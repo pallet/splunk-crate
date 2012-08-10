@@ -7,10 +7,19 @@
    [pallet.argument :as argument]
    [pallet.compute :as compute]
    [pallet.session :as session]
-   [pallet.stevedore :as stevedore]))
+   [pallet.stevedore :as stevedore])
+  (:use
+    [pallet.script.lib :only [tmp-dir]]))
 
 (def build
-  {"4.1.4" 82143
+  {"4.3.3" 128297
+   "4.3.2" 123586
+   "4.3.1" 119532
+   "4.3" 115073
+   "4.2.5" 113966
+   "4.2" 96430
+   "4.1.8" 97242
+   "4.1.4" 82143
    "4.1.3" 80534
    "4.1.2" 79191
    "4.1.1" 78281
@@ -79,14 +88,14 @@
 
 (defn url [version file]
   (format
-   "http://www.splunk.com/index.php/download_track?file=%s/linux/%s&ac=&wget=true&name=wget&typed=releases"
+   "http://www.splunk.com/page/download_track?file=%s/splunk/linux/%s&ac=&wget=true&name=wget&typed=release"
    version file))
 
 (defn md5-url
   "Unfortunately the md5 file returned is not usable with md5sum --check"
   [version file]
   (format
-   "http://www.splunk.com/index.php/download_track?file=%s/linux/%s.md5&ac=&wget=true&name=wget&typed=releases"
+   "http://www.splunk.com/page/download_track?file=%s/splunk/linux/%s.md5&ac=&wget=true&name=wget&typed=release"
    version file))
 
 (def remote-file* (action/action-fn remote-file/remote-file-action))
@@ -95,7 +104,7 @@
   (case (session/packager session)
     :aptitude
     (let [f (debfile session version)
-          deb (str (stevedore/script (tmp-dir)) "/" f)]
+          deb (str (stevedore/script (~tmp-dir)) "/" f)]
       (stevedore/checked-commands
        "Install splunk"
        (remote-file* session deb :url (url version f))
@@ -107,7 +116,7 @@
             ("/opt/splunk/bin/splunk" enable boot-start))))))
     :yum
     (let [f (rpmfile session version)
-          rpm (str (stevedore/script (tmp-dir)) "/" f)]
+          rpm (str (stevedore/script (~tmp-dir)) "/" f)]
       (stevedore/checked-commands
        "Install splunk"
        (remote-file* session rpm :url (url version f))
