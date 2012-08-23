@@ -76,58 +76,69 @@
    "2.1.3" 14652
    "2.1.2" 14524})
 
+(defn appnamesuffix [forwarder]
+  (if forwarder "forwarder" ""))
+
 (defn debfile [session version]
   (if (compute/is-64bit? (session/target-node session))
     (format "splunk-%s-%d-linux-2.6-amd64.deb" version (build version))
     (format "splunk-%s-%d-linux-2.6-intel.deb" version (build version))))
 
-(defn rpmfile [session version]
+(defn rpmfile [session version forwarder]
   (if (compute/is-64bit? (session/target-node session))
-    (format "splunk-%s-%d-linux-2.6-x86_64.rpm" version (build version))
-    (format "splunk-%s-%d-i386.rpm" version (build version))))
+    (format "splunk%s-%s-%d-linux-2.6-x86_64.rpm" (appnamesuffix forwarder) version (build version))
+    (format "splunk%s-%s-%d-i386.rpm" (appnamesuffix forwarder) version (build version))))
 
-(defn url [version file]
+(defn url-segment [forwarder]
+  (if forwarder "universalforwarder" "splunk"))
+
+(defn url [version file forwarder]
   (format
-   "http://www.splunk.com/page/download_track?file=%s/splunk/linux/%s&ac=&wget=true&name=wget&typed=release"
-   version file))
+   "http://www.splunk.com/page/download_track?file=%s/%s/linux/%s&ac=&wget=true&name=wget&typed=release"
+   version (url-segment forwarder) file))
 
 (defn md5-url
   "Unfortunately the md5 file returned is not usable with md5sum --check"
-  [version file]
+  [version file forwarder]
   (format
-   "http://www.splunk.com/page/download_track?file=%s/splunk/linux/%s.md5&ac=&wget=true&name=wget&typed=release"
-   version file))
+   "http://www.splunk.com/page/download_track?file=%s/%s/linux/%s.md5&ac=&wget=true&name=wget&typed=release"
+   version (url-segment forwarder) file))
+
+(defn get-splunk-path [forwarder]
+  (format "/opt/splunk%s/bin/splunk" (appnamesuffix forwarder)))
 
 (def remote-file* (action/action-fn remote-file/remote-file-action))
 (action/def-bash-action install
-  [session & {:keys [version]}]
+  [session & {:keys [version forwarder]}]
   (case (session/packager session)
     :aptitude
     (let [f (debfile session version)
           deb (str (stevedore/script (~tmp-dir)) "/" f)]
       (stevedore/checked-commands
        "Install splunk"
-       (remote-file* session deb :url (url version f))
+       (remote-file* session deb :url (url version f forwarder))
        (stevedore/script
-        (if-not (file-exists? "/opt/splunk/bin/splunk")
+        (if-not (file-exists? ~(get-splunk-path forwarder))
           (do
             (dpkg -i (quoted ~deb))
-            ("/opt/splunk/bin/splunk" start "--accept-license")
-            ("/opt/splunk/bin/splunk" enable boot-start))))))
+            (~(get-splunk-path forwarder) start "--accept-license")
+            (~(get-splunk-path forwarder) enable boot-start))))))
     :yum
-    (let [f (rpmfile session version)
+    (let [f (rpmfile session version forwarder)
           rpm (str (stevedore/script (~tmp-dir)) "/" f)]
       (stevedore/checked-commands
        "Install splunk"
-       (remote-file* session rpm :url (url version f))
+       (remote-file* session rpm :url (url version f forwarder))
        (stevedore/script
-        (rpm -i (quoted ~rpm))
-        ("/opt/splunk/bin/splunk" start "--accept-license")
-        ("/opt/splunk/bin/splunk" enable boot-start))))))
+        (if-not (file-exists? ~(get-splunk-path forwarder))
+          (do
+            (rpm -i (quoted ~rpm))
+            (~(get-splunk-path forwarder) start "--accept-license")
+            (~(get-splunk-path forwarder) enable boot-start))))))))
 
 (defn splunk
-  [session & {:keys [version ] :or {version "4.1.4"}}]
-  (install session :version version))
+  [session & {:keys [version forwarder] :or {version "4.3.3" forwarder false}}]
+  (install session :version version :forwarder forwarder))
 
 (defn format-section
   [m]
