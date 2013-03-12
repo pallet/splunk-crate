@@ -4,13 +4,24 @@
    [pallet.action :as action]
    [pallet.action.package :as package]
    [pallet.action.remote-file :as remote-file]
+   [pallet.action.exec-script :as exec-script]
    [pallet.argument :as argument]
    [pallet.compute :as compute]
    [pallet.session :as session]
-   [pallet.stevedore :as stevedore]))
+   [pallet.stevedore :as stevedore])
+  (:use
+    [pallet.script.lib :only [tmp-dir]]))
 
 (def build
-  {"4.1.4" 82143
+  {"5.0.2" 149561
+   "4.3.3" 128297
+   "4.3.2" 123586
+   "4.3.1" 119532
+   "4.3" 115073
+   "4.2.5" 113966
+   "4.2" 96430
+   "4.1.8" 97242
+   "4.1.4" 82143
    "4.1.3" 80534
    "4.1.2" 79191
    "4.1.1" 78281
@@ -67,58 +78,61 @@
    "2.1.3" 14652
    "2.1.2" 14524})
 
-(defn debfile [session version]
-  (if (compute/is-64bit? (session/target-node session))
-    (format "splunk-%s-%d-linux-2.6-amd64.deb" version (build version))
-    (format "splunk-%s-%d-linux-2.6-intel.deb" version (build version))))
+(defn appnamesuffix [forwarder]
+  (if forwarder "forwarder" ""))
 
-(defn rpmfile [session version]
+(defn debfile [session version forwarder]
   (if (compute/is-64bit? (session/target-node session))
-    (format "splunk-%s-%d-linux-2.6-x86_64.rpm" version (build version))
-    (format "splunk-%s-%d-i386.rpm" version (build version))))
+    (format "splunk%s-%s-%d-linux-2.6-amd64.deb" (appnamesuffix forwarder) version (build version))
+    (format "splunk%s-%s-%d-linux-2.6-intel.deb" (appnamesuffix forwarder) version (build version))))
 
-(defn url [version file]
+(defn rpmfile [session version forwarder]
+  (if (compute/is-64bit? (session/target-node session))
+    (format "splunk%s-%s-%d-linux-2.6-x86_64.rpm" (appnamesuffix forwarder) version (build version))
+    (format "splunk%s-%s-%d-i386.rpm" (appnamesuffix forwarder) version (build version))))
+
+(defn url-segment [forwarder]
+  (if forwarder "universalforwarder" "splunk"))
+
+(defn url [version file forwarder]
   (format
-   "http://www.splunk.com/index.php/download_track?file=%s/linux/%s&ac=&wget=true&name=wget&typed=releases"
-   version file))
+   "http://www.splunk.com/page/download_track?file=%s/%s/linux/%s&ac=&wget=true&name=wget&typed=release"
+   version (url-segment forwarder) file))
 
 (defn md5-url
   "Unfortunately the md5 file returned is not usable with md5sum --check"
-  [version file]
+  [version file forwarder]
   (format
-   "http://www.splunk.com/index.php/download_track?file=%s/linux/%s.md5&ac=&wget=true&name=wget&typed=releases"
-   version file))
+   "http://www.splunk.com/page/download_track?file=%s/%s/linux/%s.md5&ac=&wget=true&name=wget&typed=release"
+   version (url-segment forwarder) file))
+
+(defn get-splunk-path [forwarder]
+  (format "/opt/splunk%s/bin/splunk" (appnamesuffix forwarder)))
 
 (def remote-file* (action/action-fn remote-file/remote-file-action))
 (action/def-bash-action install
-  [session & {:keys [version]}]
+  [session & {:keys [version forwarder credentials]}]
   (case (session/packager session)
     :aptitude
-    (let [f (debfile session version)
-          deb (str (stevedore/script (tmp-dir)) "/" f)]
+    (let [f (debfile session version forwarder)
+          deb (str (stevedore/script (~tmp-dir)) "/" f)]
       (stevedore/checked-commands
        "Install splunk"
-       (remote-file* session deb :url (url version f))
+       (remote-file* session deb :url (url version f forwarder))
        (stevedore/script
-        (if-not (file-exists? "/opt/splunk/bin/splunk")
+        (if-not (file-exists? ~(get-splunk-path forwarder))
           (do
-            (dpkg -i (quoted ~deb))
-            ("/opt/splunk/bin/splunk" start "--accept-license")
-            ("/opt/splunk/bin/splunk" enable boot-start))))))
+            (dpkg -i (quoted ~deb)))))))
     :yum
-    (let [f (rpmfile session version)
-          rpm (str (stevedore/script (tmp-dir)) "/" f)]
+    (let [f (rpmfile session version forwarder)
+          rpm (str (stevedore/script (~tmp-dir)) "/" f)]
       (stevedore/checked-commands
        "Install splunk"
-       (remote-file* session rpm :url (url version f))
+       (remote-file* session rpm :url (url version f forwarder))
        (stevedore/script
-        (rpm -i (quoted ~rpm))
-        ("/opt/splunk/bin/splunk" start "--accept-license")
-        ("/opt/splunk/bin/splunk" enable boot-start))))))
-
-(defn splunk
-  [session & {:keys [version ] :or {version "4.1.4"}}]
-  (install session :version version))
+        (if-not (file-exists? ~(get-splunk-path forwarder))
+          (do
+            (rpm -i (quoted ~rpm)))))))))
 
 (defn format-section
   [m]
@@ -138,14 +152,49 @@
   {(format "fifo://%s" path) options})
 
 (defn configure
-  [session & {:keys [inputs host] :or {inputs {}}}]
-  (remote-file/remote-file
-   session
-   "/opt/splunk/etc/system/local/inputs.conf"
-   :content (format-conf
-             (merge
-              inputs
-              {:default {:host (or host
-                                   (compute/hostname
-                                    (session/target-node session)))}}))
-   :owner "splunk" :group "splunk"))
+  [session & {:keys [inputs host forwarder] :or {inputs {} forwarder false}}]
+  (let
+    [conf-dir (if forwarder
+                  (format "/opt/splunk%s/etc/apps/search/local/" (appnamesuffix forwarder))
+                  "/opt/splunk/etc/system/local/")]
+    (->
+      session
+      (pallet.action.directory/directory conf-dir
+                                         :action :create
+                                         :path true
+                                         :owner "splunk"
+                                         :group "splunk")
+      (remote-file/remote-file
+       (str conf-dir "inputs.conf")
+       :content (format-conf
+                 (merge
+                  inputs
+                  {:default {:host (or host
+                                       (compute/hostname
+                                        (session/target-node session)))}}))
+       :owner "splunk" :group "splunk")
+    )))
+
+(defn start
+  [session & {:keys [forwarder credentials] :or {forwarder false}}]
+  (if forwarder
+      (-> session
+          (remote-file/remote-file "credentials.spl" :local-file credentials)
+          (exec-script/exec-checked-script
+            "Start splunk forwarder"
+            (~(get-splunk-path forwarder) restart "--accept-license")
+            (~(get-splunk-path forwarder) install app "credentials.spl" "-auth admin:changeme" "-update 1")
+            (~(get-splunk-path forwarder) enable boot-start)))
+      (exec-script/exec-checked-script session
+        "Start splunk"
+        (~(get-splunk-path forwarder) restart "--accept-license")
+        (~(get-splunk-path forwarder) enable boot-start))
+  ))
+
+(defn splunk
+  [session & {:keys [version forwarder inputs host credentials] :or {version "5.0.2" forwarder false inputs {}}}]
+  (-> session
+      (install :version version :forwarder forwarder)
+      (configure :inputs inputs :host host :forwarder forwarder)
+      (start :forwarder forwarder :credentials credentials)
+  ))
